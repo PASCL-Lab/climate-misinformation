@@ -1,0 +1,137 @@
+# Imports
+import tensorflow as tf
+from transformers import TFRobertaModel, RobertaTokenizer
+from flask import Flask, request, jsonify, render_template_string
+import re
+import string
+import numpy as np
+import nltk
+from nltk.corpus import stopwords
+from textblob import TextBlob
+import spacy
+
+# BERT-related imports and setup
+tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+RoBERTa_model = TFRobertaModel.from_pretrained('roberta-base')
+
+
+# Text preprocessing functions
+def remove_link(text):
+    pattern = re.compile(r'https?://\S+|www\.\S+')
+    return pattern.sub(r'', text)
+
+def remove_punctuation(text):
+    Exclude = string.punctuation
+    return text.translate(str.maketrans('', '', Exclude))
+
+def remove_html_tag(text):
+    pattern = re.compile(r'<.*?>')
+    return pattern.sub(r'', text)
+
+nltk.download('stopwords')
+stopwrd = set(stopwords.words('english'))
+
+def remove_stopwords(text, stopwords):
+    split_text = text.split()
+    filtered_text = [word for word in split_text if word.lower() not in stopwords]
+    return ' '.join(filtered_text)
+
+def remove_emoji(text):
+    pattern = re.compile('[\U00010000-\U0010ffff]', flags=re.UNICODE)
+    return pattern.sub(r'', text)
+
+nlp = spacy.load("en_core_web_sm")
+
+def lemmatization(text):
+    doc = nlp(text)
+    text_ = [word.lemma_ for word in doc]
+    return ' '.join(text_)
+
+def correct_spell(text):
+    textblb = TextBlob(text)
+    return textblb.correct().string
+
+def text_cleaning(text, stopwords):
+    text = text.lower()
+    text = remove_link(text)
+    text = remove_html_tag(text)
+    text = remove_emoji(text)
+    text = remove_stopwords(text, stopwords)
+    text = remove_punctuation(text)
+    text = lemmatization(text)
+    text = correct_spell(text)
+    return text
+
+# BERT-related functions
+def get_bert_input(text):
+    inputs = tokenizer(text, padding=True, truncation=True, return_tensors='tf')
+    return inputs
+
+def get_bert_last_hidden_state_output(inputs, model):
+    output = model(inputs)
+    return output.last_hidden_state.numpy()
+
+def get_bert_pooler_output(inputs, model):
+    output = model(inputs)
+    return output.pooler_output.numpy()
+
+def convert_to_bert_last_hidden_state_output(text, model):
+    inputs = get_bert_input(text)
+    output = get_bert_last_hidden_state_output(inputs, model)
+    return output
+
+def convert_to_bert_pooler_output(text, model):
+    inputs = get_bert_input(text)
+    output = get_bert_pooler_output(inputs, model)
+    return output
+
+def model_prediction_input(text, max_sequence_length, bert_model):
+    inputs = tokenizer(text, padding=True, truncation=True, max_length=max_sequence_length, return_tensors='tf')
+    padded_input = tokenizer.pad(inputs, max_length=max_sequence_length, padding='max_length', return_tensors='tf')
+    output = bert_model(padded_input)
+    return output.last_hidden_state.numpy()
+
+# Inference model setup
+class InferenceModel:
+    def __init__(self, model_path='/content/drive/MyDrive/UBC_project/RoBERTa_model.h5'):
+        self.model_path = model_path
+        self.model = self.load_model()
+
+    def load_model(self):
+        return tf.keras.models.load_model(self.model_path)
+
+    def predict(self, input_data):
+        input_data = text_cleaning(input_data, stopwrd)
+        list_ = []
+        list_.append(input_data)
+        max_sequence_length = 42
+        input_data = model_prediction_input(list_, max_sequence_length, RoBERTa_model)
+        predictions = self.model.predict(input_data)
+        return predictions
+
+inference_model = InferenceModel()
+
+# Flask routes
+# Initialize Flask app
+
+app = Flask(__name__)
+
+@app.route('/result', methods=['POST'])
+def result():
+    try:
+        data = request.get_json()
+        news_content = data['newsInput']
+        probabilities = inference_model.predict(news_content)
+        class_0_prob = float(probabilities[0, 0])
+        class_1_prob = float(probabilities[0, 1])
+        class_2_prob = float(probabilities[0, 2])
+
+        result_text = f"Refutes: {class_0_prob*100:.2f}%,  Not Enough Info: {class_1_prob*100:.2f}%,  Supports: {class_2_prob*100:.2f}%"
+        return jsonify(result=result_text, probabilities=[class_0_prob*100, class_1_prob*100, class_2_prob*100])
+
+    except Exception as e:
+        return jsonify(error=str(e))
+
+# Main execution
+if __name__ == '__main__':
+    app.run()
